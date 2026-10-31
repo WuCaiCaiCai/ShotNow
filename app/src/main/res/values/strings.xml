@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ShotNow</string>
+    <string name="accessibility_label">ShotNow 截图服务</string>
+    <string name="accessibility_description">用于截取屏幕并复制到剪贴板。只会响应悬浮球的截图操作，不读取屏幕上的文字或其他内容。</string>
+</resources>
