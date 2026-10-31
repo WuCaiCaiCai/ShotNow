@@ -20,6 +20,45 @@
 
 要求：JDK 17+、Android SDK 35。
 
+## CI 与发布
+
+仓库：<https://github.com/WuCaiCaiCai/ShotNow>
+
+- `.github/workflows/ci.yml`：推送到 `main` 或提交 PR 时自动编译，并在 Actions 里提供 debug APK。
+- `.github/workflows/release.yml`：推送 `v*` tag 时自动构建 release APK 并创建 GitHub Release。
+- `scripts/release.sh`：本地自动改版本号、提交并打 tag。
+
+```bash
+# 只创建本地提交和 tag
+./scripts/release.sh 1.1.0
+
+# 提交、打 tag 并推送，触发自动发版
+./scripts/release.sh 1.1.0 --push
+
+# 只看会改什么，不落盘
+./scripts/release.sh 1.1.0 --dry-run
+```
+
+版本号统一维护在 `version.properties`（`VERSION_CODE` + `VERSION_NAME`），打 tag 前会校验 tag 与 `VERSION_NAME` 一致。
+
+### 签名
+
+默认 release 使用 debug 签名，方便个人直接安装；CI 会缓存 `~/.android/debug.keystore` 保持签名稳定。要换成正式签名，在仓库 Secrets 中配置：
+
+- `KEYSTORE_BASE64`：keystore 文件的 base64
+- `KEYSTORE_PASSWORD`
+- `KEY_ALIAS`
+- `KEY_PASSWORD`
+
+本地构建也可以在仓库根目录放 `keystore.properties`（已在 `.gitignore` 中）：
+
+```properties
+storeFile=/absolute/path/shotnow.jks
+storePassword=...
+keyAlias=...
+keyPassword=...
+```
+
 ## 首次使用
 
 1. 安装后打开 ShotNow。
@@ -38,3 +77,8 @@
 - Android 11 及以上可用（支持 `takeScreenshot`）。当前目标设备为三星 SM-T733 / Android 14。
 - 银行、流媒体等禁止截图的页面（FLAG_SECURE）会截图失败，这是系统限制。
 - 屏幕旋转时如果正在框选，本次框选会被取消。
+
+## 许可证
+
+[MIT](LICENSE)
+

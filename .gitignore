@@ -1,8 +1,31 @@
-*.iml
+# Gradle
 .gradle/
-.idea/
-local.properties
 build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local config
+local.properties
+keystore.properties
+
+# Android build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
 captures/
 .externalNativeBuild/
 .cxx/
+
+# IDE
+.idea/
+*.iml
+*.hprof
+
+# Signing material — never commit these
+*.jks
+*.keystore
+
+# OS
+.DS_Store
+Thumbs.db
