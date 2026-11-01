@@ -3,28 +3,30 @@ package com.shotnow.overlay
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Point
-import android.graphics.RectF
-import android.graphics.Shader
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
 import kotlin.math.abs
 import kotlin.math.min
 
 /**
- * A compact frosted-glass floating ball. Tap = start capture; drag = move.
- * The visible circle is slightly smaller than the touch window.
+ * A compact floating ball. Tap = start capture; drag = move.
+ * The visible circle is inset from the touch window so it stays comfortable
+ * to hit without looking oversized.
  */
 class FloatingBallView(
     context: Context,
     private val params: WindowManager.LayoutParams,
     private val boundsProvider: () -> Point,
     private val onMoved: (Int, Int) -> Unit,
+    accentColor: Int,
+    onAccentColor: Int,
+    opacityPercent: Int,
 ) : View(context) {
 
     private val windowManager = context.getSystemService(WindowManager::class.java)
@@ -37,70 +39,46 @@ class FloatingBallView(
     private var startY = 0
     private var dragging = false
 
-    private val basePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x1F000000
-    }
-    private val glassPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var accentColor: Int = accentColor
+    private var onAccentColor: Int = onAccentColor
+    private var opacityPercent: Int = opacityPercent.coerceIn(20, 100)
+
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(1f)
-        color = 0x80FFFFFF.toInt()
-    }
-    private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = dp(1.2f)
-        strokeCap = Paint.Cap.ROUND
-        color = 0x4DFFFFFF
-    }
-    private val glyphShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = dp(2.4f)
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-        color = 0x59000000
+        strokeWidth = dp(1.5f)
+        color = Color.WHITE
     }
     private val glyphPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = dp(1.7f)
+        strokeWidth = dp(2f)
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
-        color = Color.WHITE
     }
 
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        glassPaint.shader = LinearGradient(
-            0f,
-            0f,
-            w.toFloat(),
-            h.toFloat(),
-            intArrayOf(
-                0x66FFFFFF,
-                0x2EFFFFFF,
-                0x0FFFFFFF,
-            ),
-            floatArrayOf(0f, 0.55f, 1f),
-            Shader.TileMode.CLAMP,
-        )
+    init {
+        alpha = this.opacityPercent / 100f
+    }
+
+    fun applyAppearance(accent: Int, onAccent: Int, opacity: Int) {
+        accentColor = accent
+        onAccentColor = onAccent
+        opacityPercent = opacity.coerceIn(20, 100)
+        alpha = opacityPercent / 100f
+        invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val cx = width / 2f
         val cy = height / 2f
-        val radius = min(width, height) / 2f - dp(5f)
+        val radius = min(width, height) / 2f - dp(4f)
 
-        canvas.drawCircle(cx, cy, radius, basePaint)
-        canvas.drawCircle(cx, cy, radius, glassPaint)
+        fillPaint.color = accentColor
+        glyphPaint.color = onAccentColor
+
+        canvas.drawCircle(cx, cy, radius, fillPaint)
         canvas.drawCircle(cx, cy, radius, rimPaint)
-
-        val highlightBounds = RectF(
-            cx - radius * 0.82f,
-            cy - radius * 0.82f,
-            cx + radius * 0.82f,
-            cy + radius * 0.82f,
-        )
-        canvas.drawArc(highlightBounds, 202f, 52f, false, highlightPaint)
 
         val half = radius * 0.40f
         val arm = half * 0.58f
@@ -121,11 +99,6 @@ class FloatingBallView(
             lineTo(cx - half, cy + half)
             lineTo(cx - half, cy + half - arm)
         }
-
-        canvas.save()
-        canvas.translate(dp(0.8f), dp(0.8f))
-        canvas.drawPath(path, glyphShadowPaint)
-        canvas.restore()
         canvas.drawPath(path, glyphPaint)
     }
 
@@ -137,7 +110,12 @@ class FloatingBallView(
                 startX = params.x
                 startY = params.y
                 dragging = false
-                animate().scaleX(0.9f).scaleY(0.9f).setDuration(80).start()
+                animate()
+                    .scaleX(0.96f)
+                    .scaleY(0.96f)
+                    .setDuration(100)
+                    .setInterpolator(DecelerateInterpolator())
+                    .start()
                 return true
             }
 
@@ -156,7 +134,7 @@ class FloatingBallView(
             }
 
             MotionEvent.ACTION_UP -> {
-                animate().scaleX(1f).scaleY(1f).setDuration(110).start()
+                releasePress()
                 if (dragging) {
                     clampAndSave()
                 } else {
@@ -166,7 +144,7 @@ class FloatingBallView(
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                animate().scaleX(1f).scaleY(1f).setDuration(110).start()
+                releasePress()
                 if (dragging) clampAndSave()
                 return true
             }
@@ -177,6 +155,15 @@ class FloatingBallView(
     override fun performClick(): Boolean {
         super.performClick()
         return true
+    }
+
+    private fun releasePress() {
+        animate()
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(100)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
     }
 
     private fun applyPosition() {

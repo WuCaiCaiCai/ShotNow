@@ -31,6 +31,10 @@ import com.shotnow.capture.ShotAccessibilityService
 import com.shotnow.clipboard.ClipboardHelper
 import com.shotnow.overlay.FloatingBallView
 import com.shotnow.overlay.SelectionOverlay
+import com.shotnow.settings.AccessibilityRepair
+import com.shotnow.settings.ShotPrefs
+import com.shotnow.settings.ThemeColors
+import com.shotnow.state.AppState
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -42,32 +46,11 @@ class FloatingBallService : Service() {
         const val ACTION_START = "com.shotnow.action.START"
         const val ACTION_STOP = "com.shotnow.action.STOP"
         const val ACTION_UPDATE_SIZE = "com.shotnow.action.UPDATE_SIZE"
-
-        const val MIN_BALL_SIZE = 34
-        const val MAX_BALL_SIZE = 72
-        const val DEFAULT_BALL_SIZE = 48
+        const val ACTION_UPDATE_APPEARANCE = "com.shotnow.action.UPDATE_APPEARANCE"
 
         private const val CHANNEL_ID = "shotnow_ball"
         private const val NOTIFICATION_ID = 1001
-        private const val SETTINGS_PREFS = "shotnow_settings"
-        private const val KEY_BALL_SIZE = "ball_size_dp"
-
-        @Volatile
-        var isRunning: Boolean = false
-            private set
-
-        fun readBallSize(context: android.content.Context): Int {
-            return context.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE)
-                .getInt(KEY_BALL_SIZE, DEFAULT_BALL_SIZE)
-                .coerceIn(MIN_BALL_SIZE, MAX_BALL_SIZE)
-        }
-
-        fun writeBallSize(context: android.content.Context, sizeDp: Int) {
-            context.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE)
-                .edit()
-                .putInt(KEY_BALL_SIZE, sizeDp.coerceIn(MIN_BALL_SIZE, MAX_BALL_SIZE))
-                .apply()
-        }
+        private const val BALL_PREFS = "ball"
     }
 
     private enum class State { IDLE, CAPTURING, SELECTING, COPYING }
@@ -119,23 +102,36 @@ class FloatingBallService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                if (AppState.running.value) return START_NOT_STICKY
+
                 if (!ShotAccessibilityService.isConnected()) {
-                    toast("请先在设置中开启 ShotNow 截图服务")
-                    stopSelf()
-                    return START_NOT_STICKY
+                    val settingsReady = AccessibilityRepair.isReady(this)
+                    if (!settingsReady) {
+                        val canRepair = ShotPrefs.autoRepairEnabled(this) &&
+                            AccessibilityRepair.hasWritePermission(this)
+                        if (!canRepair || !AccessibilityRepair.ensureEnabled(this)) {
+                            toast("请先在设置中开启 ShotNow 截图服务")
+                            stopSelf()
+                            return START_NOT_STICKY
+                        }
+                    }
                 }
-                if (isRunning) return START_NOT_STICKY
 
                 captureController = ScreenCaptureController()
                 if (!showBall()) {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                isRunning = true
+                AppState.setRunning(true)
             }
 
             ACTION_UPDATE_SIZE -> {
-                if (isRunning) updateBallSize() else stopSelf()
+                if (AppState.running.value) updateBallSize() else stopSelf()
+                return START_NOT_STICKY
+            }
+
+            ACTION_UPDATE_APPEARANCE -> {
+                if (AppState.running.value) updateBallAppearance() else stopSelf()
                 return START_NOT_STICKY
             }
 
@@ -193,27 +189,41 @@ class FloatingBallService : Service() {
     }
 
     private fun showBall(): Boolean {
-        val size = dp(readBallSize(this))
+        val visibleSize = dp(ShotPrefs.ballSize(this))
+        val windowSize = visibleSize + dp(8)
         val bounds = screenMetrics()
-        val prefs = getSharedPreferences("ball", MODE_PRIVATE)
-        val maxX = (bounds.x - size).coerceAtLeast(0)
-        val maxY = (bounds.y - size).coerceAtLeast(0)
+        val prefs = getSharedPreferences(BALL_PREFS, MODE_PRIVATE)
+        val maxX = (bounds.x - windowSize).coerceAtLeast(0)
+        val maxY = (bounds.y - windowSize).coerceAtLeast(0)
+        val defaultX = (bounds.x - windowSize - dp(16)).coerceIn(0, maxX)
+        val defaultY = (bounds.y / 3).coerceIn(0, maxY)
+
         val params = WindowManager.LayoutParams(
-            size,
-            size,
+            windowSize,
+            windowSize,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = prefs.getInt("x", maxX).coerceIn(0, maxX)
-            y = prefs.getInt("y", bounds.y / 3).coerceIn(0, maxY)
+            x = prefs.getInt("x", defaultX).coerceIn(0, maxX)
+            y = prefs.getInt("y", defaultY).coerceIn(0, maxY)
         }
-        val view = FloatingBallView(this, params, ::screenMetrics) { x, y ->
-            prefs.edit().putInt("x", x).putInt("y", y).apply()
-        }
+
+        val view = FloatingBallView(
+            context = this,
+            params = params,
+            boundsProvider = ::screenMetrics,
+            onMoved = { x, y ->
+                prefs.edit().putInt("x", x).putInt("y", y).apply()
+            },
+            accentColor = ThemeColors.byId(ShotPrefs.themeId(this)).accent,
+            onAccentColor = ThemeColors.byId(ShotPrefs.themeId(this)).onAccent,
+            opacityPercent = ShotPrefs.ballOpacity(this),
+        )
         view.setOnClickListener { onBallTapped() }
+
         return try {
             windowManager.addView(view, params)
             ballView = view
@@ -227,23 +237,69 @@ class FloatingBallService : Service() {
 
     private fun onBallTapped() {
         if (state != State.IDLE) return
-        val controller = captureController ?: run {
+        state = State.CAPTURING
+
+        if (ShotAccessibilityService.isConnected()) {
+            beginCapture()
+            return
+        }
+
+        val canRepair = ShotPrefs.autoRepairEnabled(this) &&
+            AccessibilityRepair.hasWritePermission(this)
+        if (!canRepair) {
+            state = State.IDLE
+            toast("无障碍服务已关闭，请重新开启")
+            openAccessibilitySettings()
+            return
+        }
+
+        toast("正在恢复无障碍服务…")
+        AccessibilityRepair.ensureEnabled(this)
+        mainHandler.postDelayed({ continueAccessibilityRepair() }, 700)
+    }
+
+    private fun continueAccessibilityRepair() {
+        if (destroying || state != State.CAPTURING) return
+        if (ShotAccessibilityService.isConnected()) {
+            beginCapture()
+            return
+        }
+
+        AccessibilityRepair.setGlobalEnabled(this, false)
+        mainHandler.postDelayed({ finishAccessibilityRepair() }, 350)
+    }
+
+    private fun finishAccessibilityRepair() {
+        if (destroying || state != State.CAPTURING) return
+        AccessibilityRepair.setGlobalEnabled(this, true)
+        mainHandler.postDelayed({
+            if (destroying || state != State.CAPTURING) return@postDelayed
+            if (ShotAccessibilityService.isConnected()) {
+                beginCapture()
+            } else {
+                state = State.IDLE
+                toast("自动恢复失败，请手动开启无障碍")
+                openAccessibilitySettings()
+            }
+        }, 800)
+    }
+
+    private fun beginCapture() {
+        val controller = captureController
+        if (controller == null) {
+            state = State.IDLE
             toast("截图服务未就绪")
             return
         }
-        state = State.CAPTURING
         ballView?.visibility = View.GONE
 
         mainHandler.postDelayed({
-            if (state != State.CAPTURING) return@postDelayed
+            if (destroying || state != State.CAPTURING) return@postDelayed
             controller.capture { result ->
                 val bitmap = result.getOrNull()
                 if (bitmap == null) {
                     restoreIdle()
                     toast(result.exceptionOrNull()?.message ?: "截图失败")
-                    if (!ShotAccessibilityService.isConnected()) {
-                        mainHandler.postDelayed({ stopSelf() }, 600)
-                    }
                 } else {
                     showSelection(bitmap)
                 }
@@ -258,6 +314,8 @@ class FloatingBallService : Service() {
         try {
             overlay.show(
                 bitmap = bitmap,
+                stylusOnly = ShotPrefs.sPenOnly(this),
+                accentColor = ThemeColors.byId(ShotPrefs.themeId(this)).accent,
                 onSelected = { rect ->
                     selectionOverlay = null
                     copyRegion(bitmap, rect)
@@ -343,7 +401,7 @@ class FloatingBallService : Service() {
     private fun updateBallSize() {
         val view = ballView ?: return
         val params = ballParams ?: return
-        val newSize = dp(readBallSize(this))
+        val newSize = dp(ShotPrefs.ballSize(this)) + dp(8)
         if (params.width == newSize) return
         val delta = (newSize - params.width) / 2
         params.width = newSize
@@ -352,17 +410,43 @@ class FloatingBallService : Service() {
         params.y -= delta
         runCatching { windowManager.updateViewLayout(view, params) }
         clampBall()
+        saveBallPosition()
+    }
+
+    private fun updateBallAppearance() {
+        val palette = ThemeColors.byId(ShotPrefs.themeId(this))
+        ballView?.applyAppearance(
+            accent = palette.accent,
+            onAccent = palette.onAccent,
+            opacity = ShotPrefs.ballOpacity(this),
+        )
     }
 
     private fun clampBall() {
         val view = ballView ?: return
         val params = ballParams ?: return
         val bounds = screenMetrics()
-        val width = if (view.width > 0) view.width else params.width
-        val height = if (view.height > 0) view.height else params.height
-        params.x = params.x.coerceIn(0, (bounds.x - width).coerceAtLeast(0))
-        params.y = params.y.coerceIn(0, (bounds.y - height).coerceAtLeast(0))
+        params.x = params.x.coerceIn(0, (bounds.x - params.width).coerceAtLeast(0))
+        params.y = params.y.coerceIn(0, (bounds.y - params.height).coerceAtLeast(0))
         runCatching { windowManager.updateViewLayout(view, params) }
+    }
+
+    private fun saveBallPosition() {
+        val params = ballParams ?: return
+        getSharedPreferences(BALL_PREFS, MODE_PRIVATE)
+            .edit()
+            .putInt("x", params.x)
+            .putInt("y", params.y)
+            .apply()
+    }
+
+    private fun openAccessibilitySettings() {
+        runCatching {
+            startActivity(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
     }
 
     private fun screenMetrics(): Point {
@@ -375,6 +459,12 @@ class FloatingBallService : Service() {
             windowManager.defaultDisplay.getRealMetrics(metrics)
             Point(metrics.widthPixels, metrics.heightPixels)
         }
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
     override fun onDestroy() {
@@ -390,15 +480,9 @@ class FloatingBallService : Service() {
         captureController?.shutdown()
         captureController = null
         ioExecutor.shutdown()
-        isRunning = false
+        AppState.setRunning(false)
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    private fun toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-    }
 }

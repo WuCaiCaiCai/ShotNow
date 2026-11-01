@@ -21,15 +21,26 @@ import kotlin.math.roundToInt
 /**
  * Frozen screenshot with a drag-to-draw rectangle. Releasing a valid
  * rectangle reports it immediately; there is no confirm step.
+ *
+ * When [stylusOnly] is true, finger and palm events are consumed but ignored.
  */
 class RegionSelectorView(context: Context) : View(context) {
 
     var onSelectionFinished: ((Rect) -> Unit)? = null
     var onSelectionRejected: (() -> Unit)? = null
+    var stylusOnly: Boolean = false
+
+    var accentColor: Int = 0xFFE97845.toInt()
+        set(value) {
+            field = value
+            accentPaint.color = value
+            invalidate()
+        }
 
     private var bitmap: Bitmap? = null
     private val selection = RectF()
     private var dragging = false
+    private var activePointerId = -1
     private var startX = 0f
     private var startY = 0f
 
@@ -50,7 +61,7 @@ class RegionSelectorView(context: Context) : View(context) {
         style = Paint.Style.STROKE
         strokeWidth = dp(3f)
         strokeCap = Paint.Cap.ROUND
-        color = 0xFF4C8DFF.toInt()
+        color = 0xFFE97845.toInt()
     }
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -66,6 +77,7 @@ class RegionSelectorView(context: Context) : View(context) {
         bitmap = image
         selection.setEmpty()
         dragging = false
+        activePointerId = -1
         invalidate()
     }
 
@@ -143,60 +155,166 @@ class RegionSelectorView(context: Context) : View(context) {
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (bitmap == null) return false
+        return if (stylusOnly) handleStylusTouch(event) else handleAnyTouch(event)
+    }
+
+    private fun handleAnyTouch(event: MotionEvent): Boolean {
         val x = event.x.coerceIn(0f, width.toFloat())
         val y = event.y.coerceIn(0f, height.toFloat())
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                startX = x
-                startY = y
+                startAt(x, y)
                 dragging = true
-                selection.set(x, y, x, y)
-                invalidate()
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
                 if (dragging) {
-                    selection.set(
-                        min(startX, x),
-                        min(startY, y),
-                        max(startX, x),
-                        max(startY, y),
-                    )
-                    invalidate()
+                    updateAt(x, y)
                 }
                 return true
             }
 
             MotionEvent.ACTION_UP -> {
                 if (dragging) {
-                    dragging = false
-                    if (selection.width() < minSize || selection.height() < minSize) {
-                        selection.setEmpty()
-                        invalidate()
-                        onSelectionRejected?.invoke()
-                    } else {
-                        val rect = selectionInBitmap()
-                        if (rect == null) {
-                            selection.setEmpty()
-                            invalidate()
-                            onSelectionRejected?.invoke()
-                        } else {
-                            onSelectionFinished?.invoke(rect)
-                        }
-                    }
+                    updateAt(x, y)
+                    finishSelection()
                 }
                 return true
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                dragging = false
-                selection.setEmpty()
-                invalidate()
+                cancelSelection()
                 return true
             }
         }
         return true
+    }
+
+    private fun handleStylusTouch(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (isPen(event, 0)) {
+                    activePointerId = event.getPointerId(0)
+                    startAt(
+                        event.getX(0).coerceIn(0f, width.toFloat()),
+                        event.getY(0).coerceIn(0f, height.toFloat()),
+                    )
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (!dragging) {
+                    val index = findPenPointer(event)
+                    if (index >= 0) {
+                        activePointerId = event.getPointerId(index)
+                        startAt(
+                            event.getX(index).coerceIn(0f, width.toFloat()),
+                            event.getY(index).coerceIn(0f, height.toFloat()),
+                        )
+                    }
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                updateActivePointer(event)
+                return true
+            }
+
+            MotionEvent.ACTION_POINTER_UP -> {
+                val index = event.actionIndex
+                if (dragging && event.getPointerId(index) == activePointerId) {
+                    updateAt(
+                        event.getX(index).coerceIn(0f, width.toFloat()),
+                        event.getY(index).coerceIn(0f, height.toFloat()),
+                    )
+                    finishSelection()
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_UP -> {
+                if (dragging) {
+                    updateActivePointer(event)
+                    finishSelection()
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                cancelSelection()
+                return true
+            }
+        }
+        return true
+    }
+
+    private fun updateActivePointer(event: MotionEvent) {
+        if (!dragging) return
+        val index = event.findPointerIndex(activePointerId)
+        if (index < 0) return
+        updateAt(
+            event.getX(index).coerceIn(0f, width.toFloat()),
+            event.getY(index).coerceIn(0f, height.toFloat()),
+        )
+    }
+
+    private fun isPen(event: MotionEvent, index: Int): Boolean {
+        val tool = event.getToolType(index)
+        return tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER
+    }
+
+    private fun findPenPointer(event: MotionEvent): Int {
+        for (index in 0 until event.pointerCount) {
+            if (isPen(event, index)) return index
+        }
+        return -1
+    }
+
+    private fun startAt(x: Float, y: Float) {
+        startX = x
+        startY = y
+        dragging = true
+        selection.set(x, y, x, y)
+        invalidate()
+    }
+
+    private fun updateAt(x: Float, y: Float) {
+        selection.set(
+            min(startX, x),
+            min(startY, y),
+            max(startX, x),
+            max(startY, y),
+        )
+        invalidate()
+    }
+
+    private fun finishSelection() {
+        dragging = false
+        activePointerId = -1
+        if (selection.width() < minSize || selection.height() < minSize) {
+            selection.setEmpty()
+            invalidate()
+            onSelectionRejected?.invoke()
+            return
+        }
+        val rect = selectionInBitmap()
+        if (rect == null) {
+            selection.setEmpty()
+            invalidate()
+            onSelectionRejected?.invoke()
+        } else {
+            onSelectionFinished?.invoke(rect)
+        }
+    }
+
+    private fun cancelSelection() {
+        dragging = false
+        activePointerId = -1
+        selection.setEmpty()
+        invalidate()
     }
 
     private fun selectionInBitmap(): Rect? {

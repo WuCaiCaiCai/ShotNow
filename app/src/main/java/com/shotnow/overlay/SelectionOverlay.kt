@@ -25,6 +25,8 @@ class SelectionOverlay(
 
     fun show(
         bitmap: Bitmap,
+        stylusOnly: Boolean,
+        accentColor: Int,
         onSelected: (Rect) -> Unit,
         onCancel: () -> Unit,
         onRejected: () -> Unit,
@@ -54,6 +56,8 @@ class SelectionOverlay(
 
         val regionSelector = RegionSelectorView(context).apply {
             setImage(bitmap)
+            this.stylusOnly = stylusOnly
+            this.accentColor = accentColor
             onSelectionFinished = { rect -> closeThen { onSelected(rect) } }
             onSelectionRejected = onRejected
         }
@@ -66,7 +70,11 @@ class SelectionOverlay(
         )
 
         val hint = TextView(context).apply {
-            text = "截图模式 · 拖出矩形，松手自动复制\n按返回键取消"
+            text = if (stylusOnly) {
+                "仅 S Pen 可框选 · 松手自动复制\n按返回键取消"
+            } else {
+                "截图模式 · 拖出矩形，松手自动复制\n按返回键取消"
+            }
             setTextColor(Color.WHITE)
             textSize = 14f
             gravity = Gravity.CENTER
@@ -105,7 +113,7 @@ class SelectionOverlay(
         root = frame
 
         frame.alpha = 0f
-        frame.animate().alpha(1f).setDuration(110).start()
+        frame.animate().alpha(1f).setDuration(200).start()
         frame.post { frame.requestFocus() }
     }
 
